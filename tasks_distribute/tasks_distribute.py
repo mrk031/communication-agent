@@ -17,8 +17,10 @@ import math
 import time
 try:
     from .intent_router import classify_business_intents
+    from .context_manager import select_recent_context
 except ImportError:  # 兼容在 tasks_distribute 目录中直接启动脚本/uvicorn
     from intent_router import classify_business_intents
+    from context_manager import select_recent_context
 from fastapi.middleware.cors import CORSMiddleware
 from ragflow_sdk import RAGFlow
 
@@ -48,6 +50,9 @@ IDEOLOGY_URL = os.getenv("IDEOLOGY_URL", "http://127.0.0.1:8005/search")
 
 # 新增：历史记录服务地址 (根据前端8082端口推断)
 HISTORY_URL = os.getenv("HISTORY_URL", "http://127.0.0.1:8082/ctc_agent/conversations/messages")
+HISTORY_TOKEN_BUDGET = int(os.getenv("HISTORY_TOKEN_BUDGET", "1600"))
+HISTORY_MAX_MESSAGES = int(os.getenv("HISTORY_MAX_MESSAGES", "10"))
+HISTORY_MAX_MESSAGE_CHARS = int(os.getenv("HISTORY_MAX_MESSAGE_CHARS", "2000"))
 
 # SDK集成: RagFlow SDK 配置
 RAGFLOW_SDK_BASE_URL = os.getenv("RAGFLOW_BASE_URL", "http://127.0.0.1:9380")
@@ -225,13 +230,18 @@ async def get_chat_history(conv_id: str) -> Tuple[str, List[Dict[str, str]], str
                     res_json = await response.json()
                     if res_json.get("success") and res_json.get("data"):
                         messages = res_json.get("data", [])
-                        recent_messages = messages[-20:]
+                        recent_messages, context_stats = select_recent_context(
+                            messages,
+                            token_budget=HISTORY_TOKEN_BUDGET,
+                            max_messages=HISTORY_MAX_MESSAGES,
+                            max_message_chars=HISTORY_MAX_MESSAGE_CHARS,
+                        )
+                        logging.info("历史上下文预算结果: %s", context_stats)
 
                         history_builder = []
                         user_queries = []
                         for msg in recent_messages:
-                            raw_role = msg.get("sender_role", "")
-                            role = "user" if raw_role == "user" else "assistant"
+                            role = msg.get("role", "assistant")
                             content = msg.get("content", "")
 
                             if content:

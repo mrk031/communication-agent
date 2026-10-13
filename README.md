@@ -1,106 +1,179 @@
-# Communication Principles AI Agent
+# 通信原理智能问答 Agent
 
-面向通信原理教学场景的智能问答 Agent。项目以确定性异步 Workflow 为主，组合
-RAGFlow 教材检索、大模型流式回答、题库/教师答疑/案例/硬件实验服务，并提供离线
-评测、端到端黑盒测试和阶段级 Trace。
+面向高校通信原理教学场景的大模型应用：以 **RAGFlow 教材检索**为知识入口，通过
+**规则优先的意图路由**编排题库、教师答疑、交互案例与硬件实验等业务服务，并使用
+SSE 将主答案和业务结果流式返回。
 
-> 本仓库是脱敏后的工程与评测代码快照。教材、教师真实答疑、服务器地址、账号、密钥、
-> 本地运行输出及线上数据均未提交。运行前需要自行准备服务与测试数据。
+这个仓库重点展示的不是一个聊天页面，而是一套可评测、可观测、可优化的 Agent 工程链路：
+从真实知识库构造评测集，通过单变量消融冻结检索参数，再用阶段 Trace 和同题 A/B 测试定位
+端到端长尾。
 
-## Architecture
+> 为保护教学资料及线上环境，本仓库为脱敏后的工程快照，不包含教材、教师真实答疑、会话、
+> 密钥、内网地址和线上运行数据。核心编排、评测与分析代码均已保留。
 
-```text
-Text / Image question
-        │
-        ├── OCR and question fusion
-        │
-        ├── RAGFlow hybrid retrieval ── Top-10 candidates ── Top-4 context
-        │
-        └── rule-first intent routing
-                │
-                ├── main LLM answer (SSE)
-                ├── question bank / teacher Q&A
-                ├── interactive cases
-                └── hardware experiments
+## 项目成果
 
-All stages ── rag / intent / llm_answer / business / workflow Trace
+| 优化对象 | 基线 | 优化后 | 结果 |
+|---|---:|---:|---:|
+| Gold-dev 检索 Hit@4 | 86.7% | 93.3% | +6.6 pp |
+| 冻结 Gold-test 检索 | — | Hit@4 85%、Hit@10 95% | MRR 0.816 |
+| Prompt 平均 TTFT | 17.76 s | 7.81 s | -56.0% |
+| Prompt 端到端时间 | 21.04 s | 11.05 s | -47.5% |
+| 意图识别 P50 / P95 | 25.49 / 73.41 s | 0.078 / 0.185 ms | 消除额外LLM等待 |
+| Agent完整流 P50 / P95 | 27.34 / 73.96 s | 10.87 / 29.01 s | 约降低60% |
+| 普通问答无关Section | 111次 / 60题 | 0次 / 60题 | 消除误触发 |
+| Agent黑盒成功率 | — | 60 / 60 | 100% |
+
+冻结方案在未参与调参的20题Gold-test上完成最终验收。答案层RAG相对no-RAG的字符F1平均
+提升0.204，19/20题提升；字符F1仅作为低成本筛查指标，语义正确性仍结合证据与人工抽查判断。
+
+## 系统架构
+
+```mermaid
+flowchart LR
+    U[文本 / 图片问题] --> O[OCR与问题融合]
+    O --> R[RAGFlow混合检索]
+    O --> I[规则优先意图路由]
+    R --> C[Top-10候选 / Top-4上下文]
+    C --> L[LLM流式主回答]
+    I --> Q[题库 / 教师答疑]
+    I --> H[交互案例 / 硬件实验]
+    L --> S[SSE统一事件队列]
+    Q --> S
+    H --> S
+    S --> F[前端增量渲染]
+    L -.异步.-> N[推荐追问]
+    T[Stage Trace] -.-> R
+    T -.-> I
+    T -.-> L
+    T -.-> Q
+    T -.-> H
 ```
 
-当前系统更准确地属于“具备 Agent 能力的 Workflow”，而不是完全自主规划型 Agent：
-路由、并发、超时、降级和结束条件由代码控制，LLM承担答案生成和结构化参数抽取。
+项目采用“**确定性Workflow为主、LLM语义能力为辅**”的设计。路由、并发、超时、降级和停止
+条件由代码控制，LLM主要负责知识增强回答和结构化参数抽取。这种方案比完全自主规划型Agent
+更适合教学系统：执行路径稳定、业务边界清晰，也更容易进行回归测试和性能验收。
 
-## Highlights
+## 核心工作
 
-- 规则优先的多标签意图路由，保留 `INTENT_ROUTER_MODE=llm` 回滚开关。
-- RAGFlow 关键词与向量混合检索，冻结配置为向量权重 0.6、关键词权重 0.4。
-- 基于统一 SSE 队列并发输出主答案、配置和业务 Section。
-- 推荐追问与主回答解耦，附加服务失败不阻塞主答案。
-- RAG、意图、模型回答及业务服务的阶段级 Trace。
-- 覆盖检索层、答案层和完整 Agent 层的评测脚本。
-- MCP 客户端工具发现与硬件设备健康检查示例。
+### 1. RAG检索与参数消融
 
-## Evaluation Results
+- 从RAGFlow只读导出两份教材的3794个真实Chunk，审计Book解析策略和Chunk长度分布。
+- 自动生成300道候选题，经证据审查形成Gold 80、Silver 168、待复核52；Gold划分为
+  dev 60 / test 20，避免使用最终测试集反复调参。
+- 对相似度阈值、向量/关键词权重、候选规模和生成上下文进行单变量实验。
+- 最终冻结 `0.6 × vector similarity + 0.4 × term similarity`；第一阶段保留Top-10，
+  仅将Top-4送入LLM，控制上下文噪声和输入成本。
+- Top-20没有增加召回，却将平均上下文从约354 Token提高到约1612 Token，因此没有盲目扩大上下文。
 
-以下结果来自本地真实链路实验；原始私有数据和输出未提交。
+### 2. Agent路由与异步编排
 
-| Layer | Result |
-|---|---:|
-| Frozen Gold-test retrieval | Hit@1 75%, Hit@4 85%, Hit@10 95% |
-| Frozen Gold-test ranking | MRR 0.816, nDCG@4 0.813 |
-| Answer comparison | RAG improved character F1 on 19/20 test cases |
-| Agent success rate | 60/60 |
-| Intent P50/P95 | 25.49/73.41 s → 0.078/0.185 ms |
-| Full workflow P50/P95 | 27.34/73.96 s → 10.87/29.01 s |
-| Unrelated business sections | 111 → 0 on 60 ordinary textbook questions |
+- 将普通问答、题库、教师答疑、交互案例、硬件实验、其他课程实验和思政案例统一编排。
+- 通过单一SSE事件队列按实际完成顺序推送Token、配置与业务Section，避免等待全部业务结束。
+- 主回答结束发送 `answer_complete`，推荐追问通过独立接口异步生成，不再阻塞主Workflow。
+- 辅助服务设置独立超时与降级：例如硬件参数抽取失败时返回空参数，但仍保留实验资源结果。
 
-字符 F1 仅用于自动筛查；正式结论需要结合语义正确性、证据忠实度和人工/Judge评审。
+### 3. 意图识别优化
 
-## Repository Layout
+旧实现对每个请求调用一次LLM进行多标签分类。阶段Trace表明该节点P50达到25.49秒，并在60道
+普通教材题上触发111个无关业务Section。
+
+优化后使用高置信规则直接路由，普通问答只执行RAG主回答，明确请求专项资源时才调用对应模块；
+同时保留 `INTENT_ROUTER_MODE=llm` 作为回滚与对照开关。该改动使完整流P50由27.34秒降至
+10.87秒，而同题字符F1差值的95%区间跨0，未观察到系统性质量退化。
+
+### 4. 上下文管理
+
+早期版本直接加载最近20条消息，消息长度和Token开销不可控。当前增加了轻量上下文预算层：
+
+- 按用户消息及其后续回答组织完整轮次；
+- 默认最多保留10条消息、约1600 Token；
+- 从最近轮次向前装载，优先保证指代和局部语境；
+- 过滤空消息和异常角色，超长消息保留首尾并明确标记截断；
+- 原始历史仍保存在会话服务中，不因请求侧压缩而被删除。
+
+这是低风险的短期记忆优化，不额外调用摘要模型。后续可以演进为“最近完整轮次＋滚动摘要＋
+结构化业务状态＋检索式长期记忆”，并通过事实保持率、任务成功率、Token与TTFT联合验收。
+
+### 5. 可观测与评测闭环
+
+系统分别记录 `rag`、`intent`、`llm_answer`、`business:*` 和 `workflow` 的start/end/error、
+阶段耗时及请求ID。评测体系分为三层：
+
+| 层级 | 主要指标 |
+|---|---|
+| 检索层 | Hit@K、Recall@K、Precision@K、MRR、nDCG |
+| 答案层 | 正确性、字符F1、证据忠实度、配对胜负 |
+| Agent层 | 成功率、TTFT、答案完成、完整流、P50/P95/P99、业务误触发 |
+
+所有关键改动均采用同题配对，而不是比较两组无关样本；均值容易受到长尾影响，因此同时报告
+中位数、P95/P99和Bootstrap置信区间。
+
+## 多模态与硬件实验
+
+- 图片问题先经过OCR，再与用户文本融合为统一问题，复用相同的路由、检索和生成链路。
+- 实验分支从最近历史中抽取QPSK、DPSK等实体，结合语义相关度、时间位置和角色权重选择目标实验。
+- 自然语言实验参数通过结构化抽取映射为硬件配置，再由TCP客户端发送至实验设备。
+- `integrations/mcp_monitor.py` 使用 `MultiServerMCPClient` 完成远程MCP工具发现和设备健康检查。
+
+边界说明：本仓库展示的是MCP客户端接入；`hardwareSet`仍是FastAPI/TCP服务，不将其包装成
+“已完成的MCP Server”。写入硬件的生产级工具还应补充参数范围校验、幂等、权限和人工确认。
+
+## 目录结构
 
 ```text
-tasks_distribute/     Agent入口、意图路由、RAG与业务编排、SSE Trace
-evaluation/           数据构建、检索/答案/Agent评测及A/B分析
-hardwareSet/          自然语言到硬件实验参数的结构化抽取示例
-integrations/         MCP设备工具发现与健康检查示例
-.env.example          脱敏配置模板
+communication-agent/
+├── tasks_distribute/
+│   ├── tasks_distribute.py      # Agent入口、RAG、异步业务编排与SSE Trace
+│   ├── intent_router.py         # 规则优先的多标签意图路由
+│   └── context_manager.py       # 最近完整轮次与Token预算
+├── evaluation/
+│   ├── run_ragflow_baseline.py  # 检索层实验
+│   ├── run_e2e_answer_eval.py   # no-RAG / RAG答案对照
+│   ├── run_agent_e2e.py         # 完整Agent黑盒评测
+│   └── analyze_*.py             # 指标聚合与配对分析
+├── hardwareSet/                 # 实验参数抽取与设备TCP客户端
+├── integrations/
+│   └── mcp_monitor.py           # MCP工具发现与设备健康检查
+└── .env.example                 # 脱敏配置模板
 ```
 
-## Quick Start
+## 快速开始
 
-### 1. Configuration
+### 环境配置
 
 ```powershell
 Copy-Item .env.example .env
+pip install -r tasks_distribute\requirements.txt
 ```
 
-在本地填写必要地址和密钥。`.env`已被Git忽略，禁止提交真实凭据。
+本地填写所需服务地址和凭据。`.env`已被Git忽略，禁止将真实密钥提交到仓库。
 
-### 2. Start the Agent
+### 启动Agent入口
 
 ```powershell
-pip install -r tasks_distribute\requirements.txt
 $env:RAGFLOW_API_KEY = "your-local-key"
 $env:INTENT_ROUTER_MODE = "rules"
 python tasks_distribute\tasks_distribute.py
 ```
 
-默认入口：`POST http://127.0.0.1:9450/tasks_distribute`。
+默认接口：`POST http://127.0.0.1:9450/tasks_distribute`。
 
-### 3. Run Tests
+完整运行还依赖RAGFlow、模型、OCR及业务服务；仓库不包含私有服务与教学数据。
+
+### 运行单元测试
 
 ```powershell
 python -m unittest discover -s evaluation -p "test_*.py"
 ```
 
-### 4. Agent Black-box Evaluation
+### 完整Agent黑盒评测
 
-评测数据采用JSONL，每条至少包含：
+评测集采用JSONL，每条记录至少包含：
 
 ```json
 {"case_id":"example-1","question":"什么是QPSK？","reference_answer":"...","split":"dev"}
 ```
-
-运行：
 
 ```powershell
 python evaluation\run_agent_e2e.py `
@@ -110,38 +183,18 @@ python evaluation\run_agent_e2e.py `
   --output evaluation\output\agent_dev
 ```
 
-## RAG Evaluation Design
+## 工程取舍与后续方向
 
-- Gold：问题、参考答案、证据原文和 Gold Chunk ID 均经过审查。
-- Silver：用于快速回归，不作为最终验收结论。
-- Dev：允许反复调参。
-- Test：参数和 Prompt 冻结后只运行一次，避免测试泄漏。
-- 教师答疑困难集：用于外部验证，不与教材可回答 Gold 混为一体。
+- **Rerank**：当前混合检索已通过冻结测试，尚未引入独立Reranker；后续应在固定候选集上比较
+  排序增益、时延与成本后再决定是否上线。
+- **长期记忆**：当前只做低风险短期预算；长期记忆需要写入准入、事实来源、冲突处理和用户删除能力。
+- **Agent Skill**：路由、RAG、后端编排与评测已模块化，但尚未封装为正式 `SKILL.md` 包。
+- **完整复现**：私有教材和后端服务不公开；仓库用于展示核心设计、优化方法与可复用评测链路。
 
-主要指标包括 Hit@K、Recall@K、Precision@K、MRR、nDCG、字符F1、TTFT、
-P50/P95/P99、上下文Token估算和完整Workflow耗时。
+## 安全说明
 
-## MCP Scope
-
-`integrations/mcp_monitor.py`展示了基于 `MultiServerMCPClient` 的远程工具发现和设备
-健康检查。`hardwareSet`当前仍通过普通 FastAPI/TCP 完成参数抽取与下发，本仓库不将其
-宣称为完整 MCP Server。
-
-若继续演进，可将实验检索、设备状态、参数解析和配置下发分别暴露为 MCP Tools；配置
-下发属于写操作，应增加参数范围校验、权限控制、幂等键和人工确认。
-
-## Security
-
-- 所有服务地址和密钥通过环境变量注入。
-- 教材、真实问答、会话、日志和评测输出不进入Git。
-- RAG文本和工具结果应视为不可信输入，不能覆盖系统指令。
-- 对硬件配置等写操作，应在生产环境启用审批、权限与审计。
-- 如果历史版本中的密钥曾被暴露，应立即轮换；仅删除文件不能使旧密钥恢复安全。
-
-## Known Limitations
-
-- 仓库不包含线上业务服务和私有数据，因此无法一键复现完整生产拓扑。
-- 当前没有通用上下文压缩，仅保留最近对话并为硬件实验维护专项实体记忆。
-- 当前项目未配置独立Reranker。
-- MCP Server和正式Agent Skill仍属于后续演进方向。
+- 所有服务地址、账号和密钥通过环境变量注入。
+- 教材、真实答疑、会话、日志和评测输出不进入Git。
+- RAG文档和工具结果均视为不可信数据，不能覆盖系统指令。
+- 对硬件配置等写操作，生产环境应启用权限、审批和审计。
 

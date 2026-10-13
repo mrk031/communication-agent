@@ -22,7 +22,7 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 
 # 复制你的核心代码
-COPY tasks_distribute.py intent_router.py /app/
+COPY tasks_distribute.py intent_router.py context_manager.py /app/
 
 # 暴露端口
 EXPOSE 9450
