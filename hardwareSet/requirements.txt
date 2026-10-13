@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+langchain-core
+langchain
+langchain-openai
+langchain-community
+nest_asyncio
+langchain_mcp_adapters
+langchain-deepseek
+requests

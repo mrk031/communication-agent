@@ -1,0 +1,57 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+secrets*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.lnk
+
+# Logs, runtime files, and backups
+logs/
+*.log
+*.pid
+*.tmp
+*.bak
+*.save
+*.save.*
+temp_files/
+
+# Local evaluation data and generated reports
+evaluation/.vendor/
+evaluation/data/local/
+evaluation/output/
+
+# Downloaded runtimes and binary artifacts
+xinghe/frp_*/
+*.exe
+*.dll
+
+# Large media is kept outside ordinary Git. Use Git LFS if it must be versioned.
+*.mp4
+
+# JavaScript build dependencies, if added later
+node_modules/
+dist/
+
+

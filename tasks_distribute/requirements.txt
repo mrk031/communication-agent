@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pydantic
+requests
+jinja2
+python-multipart
+aiohttp
+ragflow-sdk
